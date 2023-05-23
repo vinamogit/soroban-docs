@@ -1135,10 +1135,31 @@ If you didn't yet, build the soroban-preview docker image:
 make build-docker
 ```
 
+Output:
+
+```bash
+docker build . --tag soroban-preview:8
+[+] Building 1.1s (14/14) FINISHED 
+
+...
+
+ => [internal] load build definition from Dockerfile    
+ => => writing image sha256:c79f466bd1097efe67adf67b95dcf202676fa8a5ffde186020860c4278f3c08d
+ => => naming to docker.io/library/soroban-preview:8    
+```
+
 In one terminal, run the backend docker containers and wait for them to start:
 
 ```bash
 ./quickstart.sh standalone
+```
+
+Output:
+
+```bash
+stellar-core: Synced!; Publishing 1 queued checkpoints [23-23]: Ready to run: prepare-snapshot
+stellar-core: Synced!; Publishing 1 queued checkpoints [23-23]: Waiting: prepare-snapshot
+stellar-core: Synced!
 ```
 
 You know that it fully started if it goes into a loop publishing & syncing checkpoints.
@@ -1151,6 +1172,34 @@ You can use your own local soroban-cli:
 
 ```bash
 ./initialize.sh standalone
+```
+
+Output:
+
+```bash
+Using standalone network
+Add the standalone network to cli client
+Fund token-admin account from friendbot
+Wrap the Stellar asset
+SUCCESS
+Token wrapped succesfully with TOKEN_ID: 464dc44dc1eee14444595530a07446d637a6f1727e5b65904e54035cadd75a75
+Build the crowdfund contract
+cargo fmt --all
+cargo build --target wasm32-unknown-unknown --release
+    Finished release [optimized] target(s) in 0.18s
+cd target/wasm32-unknown-unknown/release/ && \
+                for i in *.wasm ; do \
+                        ls -l "$i"; \
+                done
+-rwxr-xr-x@ 1 julianmartinez  staff  5116 May 15 18:22 soroban_crowdfund_contract.wasm
+Deploy the crowdfund contract
+SUCCESS
+SUCCESS
+Contract deployed succesfully with ID: ec1890e403b5be86720657356d8e8f38426fd0cbcfe81621c50641500806e3d4
+Initialize the crowdfund contract
+SUCCESS
+
+Done
 ```
 
 Or run it inside the soroban-preview docker container:
