@@ -18,7 +18,7 @@ We'll be exploring an existing [End-to-End Example Soroban Dapp](https://github.
 
 ## Prerequisites
 
-1. `soroban-cli v0.7.1`. See https://soroban.stellar.org/docs/getting-started/setup#install-the-soroban-cli
+1. `soroban-cli v0.8.0`. See https://soroban.stellar.org/docs/getting-started/setup#install-the-soroban-cli
 2. `docker` (both Standalone and Futurenet backends require it).
 3. `Node.js v17`
 4. `Freighter wallet v2.9.1`. Download it from https://github.com/stellar/freighter/releases/tag/2.9.1 and Enable "Experimental Mode" in the settings (gear icon).
@@ -56,7 +56,7 @@ This command simplifies the Docker build process and ensures it's consistently e
 
 ```bash
 docker build . \
- --tag soroban-preview:8 \
+ --tag soroban-preview:9 \
  --force-rm \
  --rm
 ```
@@ -70,10 +70,10 @@ docker build .
 instructs Docker to build an image using the Dockerfile in the current directory (denoted by the .).
 
 ```bash
---tag soroban-preview:8
+--tag soroban-preview:9
 ```
 
-gives a name and tag to our image, in this case, soroban-preview with the tag 8.
+gives a name and tag to our image, in this case, soroban-preview with the tag 9.
 
 ```bash
 --force-rm
@@ -110,11 +110,12 @@ pub fn initialize(
         recipient: Address,
         deadline: u64,
         target_amount: i128,
-        token: BytesN<32>,
+        token: Address,
     ) {
         assert!(!e.storage().has(&DataKey::Recipient), "already initialized");
 
         e.storage().set(&DataKey::Recipient, &recipient);
+        e.storage().set(&DataKey::RecipientClaimed, &false);
         e.storage()
             .set(&DataKey::Started, &get_ledger_timestamp(&e));
         e.storage().set(&DataKey::Deadline, &deadline);
@@ -146,15 +147,13 @@ The function `get_state` identifies the current state of the campaign, relying o
 ```rust
 fn get_state(e: &Env) -> State {
     let deadline = get_deadline(e);
-    let target_amount = get_target_amount(e);
     let token_id = get_token(e);
-    let token_balance = get_balance(e, &token_id);
     let current_timestamp = get_ledger_timestamp(e);
 
     if current_timestamp < deadline {
         return State::Running;
     };
-    if token_balance >= target_amount {
+    if get_recipient_claimed(e) || target_reached(e, &token_id) {
         return State::Success;
     };
     State::Expired
@@ -170,6 +169,8 @@ pub fn deposit(e: Env, user: Address, amount: i128) {
     user.require_auth();
     assert!(amount > 0, "amount must be positive");
     assert!(get_state(&e) == State::Running, "sale is not running");
+    let token_id = get_token(&e);
+    let current_target_met = target_reached(&e, &token_id);
 
     let recipient = get_recipient(&e);
     assert!(user != recipient, "recipient may not deposit");
@@ -177,8 +178,17 @@ pub fn deposit(e: Env, user: Address, amount: i128) {
     let balance = get_user_deposited(&e, &user);
     set_user_deposited(&e, &user, &(balance + amount));
 
-    let client = token::Client::new(&e, &get_token(&e));
-    client.xfer(&user, &e.current_contract_address(), &amount);
+    let client = token::Client::new(&e, &token_id);
+    client.transfer(&user, &e.current_contract_address(), &amount);
+
+    let contract_balance = get_balance(&e, &token_id);
+
+    // emit events
+    events::pledged_amount_changed(&e, contract_balance);
+    if !current_target_met && target_reached(&e, &token_id) {
+        // only emit the target reached event once on the pledge that triggers target to be met
+        events::target_reached(&e, contract_balance, get_target_amount(&e));
+    }
 }
 ```
 
@@ -204,8 +214,14 @@ pub fn withdraw(e: Env, to: Address) {
                 to == recipient,
                 "sale was successful, only the recipient may withdraw"
             );
+            assert!(
+                !get_recipient_claimed(&e),
+                "sale was successful, recipient has withdrawn funds already"
+            );
+
             let token = get_token(&e);
             transfer(&e, &recipient, &get_balance(&e, &token));
+            set_recipient_claimed(&e);
         }
         State::Expired => {
             assert!(
@@ -217,6 +233,11 @@ pub fn withdraw(e: Env, to: Address) {
             let balance = get_user_deposited(&e, &to);
             set_user_deposited(&e, &to, &0);
             transfer(&e, &to, &balance);
+
+            // emit events
+            let token_id = get_token(&e);
+            let contract_balance = get_balance(&e, &token_id);
+            events::pledged_amount_changed(&e, contract_balance);
         }
     };
 }
@@ -241,15 +262,18 @@ cargo test
 This command runs all the tests in our project. The output should look like this:
 
 ```bash
-running 6 tests
+running 9 tests
 test test::test_expired ... ok
 test test::sale_still_running - should panic ... ok
 test test::test_success ... ok
-test test::sale_successful_only_recipient - should panic ... ok
-test test::sale_expired_recipient_not_allowed - should panic ... ok
 test test::sale_not_running - should panic ... ok
+test test::sale_expired_recipient_not_allowed - should panic ... ok
+test test::sale_successful_only_recipient - should panic ... ok
+test test::sale_successful_non_recipient_still_denied_after_withdrawal - should panic ... ok
+test test::test_events ... ok
+test test::sale_successful_recipient_withdraws_only_once - should panic ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
 ```
 
 Let's take a brief look at our test file:
@@ -261,8 +285,8 @@ Let's take a brief look at our test file:
 /// 1. Deadline 10 seconds from now.
 /// 2. Target amount of 15.
 /// 3. One deposit of 10 from user1.
-
-impl Setup {
+///
+impl Setup<'_> {
     fn new() -> Self {
         let e: Env = soroban_sdk::Env::default();
         let recipient = Address::random(&e);
@@ -275,19 +299,18 @@ impl Setup {
 
         // Create the token contract
         let token_admin = Address::random(&e);
-        let contract_token = e.register_stellar_asset_contract(token_admin.clone());
+        let contract_token = e.register_stellar_asset_contract(token_admin);
         let token = Token::new(&e, &contract_token);
 
         // Create the crowdfunding contract
-        let (contract_crowdfund, crowdfund) =
+        let (crowdfund_id, crowdfund) =
             create_crowdfund_contract(&e, &recipient, deadline, &target_amount, &contract_token);
-        let crowdfund_id = Address::from_contract_id(&e, &contract_crowdfund);
 
         // Mint some tokens to work with
-        token.mint(&token_admin, &user1, &10);
-        token.mint(&token_admin, &user2, &5);
+        token.mock_all_auths().mint(&user1, &10);
+        token.mock_all_auths().mint(&user2, &8);
 
-        crowdfund.client().deposit(&user1, &10);
+        crowdfund.client().mock_all_auths().deposit(&user1, &10);
 
         Self {
             env: e,
@@ -310,7 +333,11 @@ fn test_expired() {
     let setup = Setup::new();
     advance_ledger(&setup.env, 11);
 
-    setup.crowdfund.client().withdraw(&setup.user1);
+    setup
+        .crowdfund
+        .client()
+        .mock_all_auths()
+        .withdraw(&setup.user1);
 
     assert_eq!(setup.token.balance(&setup.user1), 10);
     assert_eq!(setup.token.balance(&setup.crowdfund_id), 0);
@@ -323,19 +350,30 @@ fn test_expired() {
 #[test]
 fn test_success() {
     let setup = Setup::new();
-    setup.crowdfund.client().deposit(&setup.user2, &5);
+    setup
+        .crowdfund
+        .client()
+        .mock_all_auths()
+        .deposit(&setup.user2, &5);
 
-    assert_eq!(setup.token.balance(&setup.user1), 0);
-    assert_eq!(setup.token.balance(&setup.user2), 0);
-    assert_eq!(setup.token.balance(&setup.crowdfund_id), 15);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.user1), 0);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.user2), 3);
+    assert_eq!(
+        setup.token.mock_all_auths().balance(&setup.crowdfund_id),
+        15
+    );
 
     advance_ledger(&setup.env, 10);
-    setup.crowdfund.client().withdraw(&setup.recipient);
+    setup
+        .crowdfund
+        .client()
+        .mock_all_auths()
+        .withdraw(&setup.recipient);
 
-    assert_eq!(setup.token.balance(&setup.user1), 0);
-    assert_eq!(setup.token.balance(&setup.user2), 0);
-    assert_eq!(setup.token.balance(&setup.crowdfund_id), 0);
-    assert_eq!(setup.token.balance(&setup.recipient), 15);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.user1), 0);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.user2), 3);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.crowdfund_id), 0);
+    assert_eq!(setup.token.mock_all_auths().balance(&setup.recipient), 15);
 }
 ```
 
@@ -346,7 +384,11 @@ fn test_success() {
 #[should_panic(expected = "sale is still running")]
 fn sale_still_running() {
     let setup = Setup::new();
-    setup.crowdfund.client().withdraw(&setup.recipient);
+    setup
+        .crowdfund
+        .client()
+        .mock_all_auths()
+        .withdraw(&setup.recipient);
 }
 ```
 
@@ -963,7 +1005,7 @@ docker run -dti \
   -p 8001:8000 \
   --ipc=host \
   --network soroban-network \
-  soroban-preview:8
+  soroban-preview:9
 
 # Run the stellar quickstart image
 docker run --rm -ti \
@@ -1106,7 +1148,7 @@ Now that we've explored the code for our crowdfunding dapp, let's run it and see
 
 Before running the example decentralized app (Dapp), make sure to install the following dependencies:
 
-- [soroban-cli v0.7.1](https://soroban.stellar.org/docs/getting-started/setup#install-the-soroban-cli)
+- [soroban-cli v0.8.0](https://soroban.stellar.org/docs/getting-started/setup#install-the-soroban-cli)
 - Docker (both Standalone and Futurenet backends require it).
 - Node.js v17
 - [Freighter wallet v2.9.1](https://github.com/stellar/freighter/releases/tag/2.9.1). After downloading, enable "Experimental Mode" in the settings (gear icon).
@@ -1138,14 +1180,14 @@ make build-docker
 Output:
 
 ```bash
-docker build . --tag soroban-preview:8
+docker build . --tag soroban-preview:9
 [+] Building 1.1s (14/14) FINISHED 
 
 ...
 
  => [internal] load build definition from Dockerfile    
  => => writing image sha256:c79f466bd1097efe67adf67b95dcf202676fa8a5ffde186020860c4278f3c08d
- => => naming to docker.io/library/soroban-preview:8    
+ => => naming to docker.io/library/soroban-preview:9    
 ```
 
 In one terminal, run the backend docker containers and wait for them to start:
@@ -1179,25 +1221,23 @@ Output:
 ```bash
 Using standalone network
 Add the standalone network to cli client
+Create the token-admin identity
 Fund token-admin account from friendbot
 Wrap the Stellar asset
-SUCCESS
-Token wrapped succesfully with TOKEN_ID: 464dc44dc1eee14444595530a07446d637a6f1727e5b65904e54035cadd75a75
+Token wrapped succesfully with TOKEN_ID: 46c9828f7b2c8e4b32f8d6a330ca277985c9e49119f508aff2a217efe28af550
+Token Address converted to StrKey contract address format: CBDMTAUPPMWI4SZS7DLKGMGKE54YLSPESEM7KCFP6KRBP37CRL2VAB3H
 Build the crowdfund contract
 cargo fmt --all
-cargo build --target wasm32-unknown-unknown --release
-    Finished release [optimized] target(s) in 0.18s
+cargo build --target wasm32-unknown-unknown --no-default-features --release
+    Finished release [optimized] target(s) in 0.06s
 cd target/wasm32-unknown-unknown/release/ && \
                 for i in *.wasm ; do \
                         ls -l "$i"; \
                 done
--rwxr-xr-x@ 1 julianmartinez  staff  5116 May 15 18:22 soroban_crowdfund_contract.wasm
+-rwxr-xr-x@ 1 julianmartinez  staff  5974 Jun  1 13:10 soroban_crowdfund_contract.wasm
 Deploy the crowdfund contract
-SUCCESS
-SUCCESS
-Contract deployed succesfully with ID: ec1890e403b5be86720657356d8e8f38426fd0cbcfe81621c50641500806e3d4
+Contract deployed succesfully with ID: 30cd9f5b2cefaf7840ff95371ffa8a53d421faf3923ee520b55b52c2ce2ab22b
 Initialize the crowdfund contract
-SUCCESS
 
 Done
 ```
