@@ -4,6 +4,7 @@
 const lightCodeTheme = require("prism-react-renderer/themes/nightOwl");
 const darkCodeTheme = require("prism-react-renderer/themes/dracula");
 
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: "Soroban - Smart Contracts Platform for Developers",
@@ -37,6 +38,15 @@ const config = {
         sidebarPath: require.resolve('./sidebarsApi.js'),
       },
     ],
+    [
+      '@docusaurus/plugin-content-docs',
+    {
+      id: 'dapps',
+      path: 'dapps',
+      routeBasePath: 'dapps',
+      sidebarPath: require.resolve('./sidebarsDapps.js'),
+    },
+  ],
     require('./src/dev-server-plugin'),
     require('./src/analytics-module')
   ],
@@ -83,8 +93,7 @@ const config = {
           {
             to: '/api',
             label: 'API',
-            position: 'left',
-            docsPluginId: 'api'
+            position: 'left'
           },
           // {
           //   href: 'https://fastcheapandoutofcontrol.com/',
@@ -92,11 +101,11 @@ const config = {
           //   className: 'nav-highlight',
           //   position: 'left',
           // },
-          // {
-          //   href: '/sorobanathon',
-          //   label: 'Sorobanathon',
-          //   position: 'left'
-          // },
+          {
+            to: '/dapps',
+            label: 'Dapps',
+            position: 'left'
+          },
           {
             href: 'https://github.com/stellar/rs-soroban-sdk',
             label: 'GitHub',
